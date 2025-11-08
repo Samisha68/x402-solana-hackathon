@@ -1,0 +1,19 @@
+{
+  "name": "x402-creator-access-pass",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "app/server",
+    "app/web"
+  ],
+  "scripts": {
+    "dev:server": "npm run -w app/server dev",
+    "dev:web": "npm run -w app/web dev",
+    "build": "npm run -w app/server build && npm run -w app/web build",
+    "start": "npm run -w app/server start"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
