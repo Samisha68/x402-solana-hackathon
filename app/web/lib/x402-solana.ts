@@ -2,6 +2,54 @@ import { Connection, PublicKey, Transaction, ComputeBudgetProgram } from "@solan
 import { getAssociatedTokenAddress, createTransferCheckedInstruction, getAccount, createAssociatedTokenAccountInstruction, getMint } from "@solana/spl-token";
 import { WalletContextState } from "@solana/wallet-adapter-react";
 
+/**
+ * Poll for transaction signature by checking recent transactions
+ */
+async function findTransactionSignature(
+  connection: Connection,
+  walletPubkey: PublicKey,
+  recipientPubkey: PublicKey,
+  amount: bigint,
+  maxAttempts: number = 10
+): Promise<string | null> {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      // Get recent signatures for the wallet
+      const signatures = await connection.getSignaturesForAddress(walletPubkey, { limit: 5 });
+      
+      for (const sigInfo of signatures) {
+        // Get transaction details
+        const tx = await connection.getTransaction(sigInfo.signature, {
+          maxSupportedTransactionVersion: 0,
+        });
+        
+        if (!tx) continue;
+        
+        // Check if this transaction is recent (within last 30 seconds)
+        const txTime = tx.blockTime ? tx.blockTime * 1000 : 0;
+        const now = Date.now();
+        if (now - txTime > 30000) {
+          // Transaction is too old, skip
+          continue;
+        }
+        
+        // For now, return the first recent transaction signature
+        // A more robust solution would decode and verify it's the correct transfer
+        // But this is a reasonable heuristic: if payment just succeeded, the most recent
+        // transaction from our wallet is likely the payment transaction
+        return sigInfo.signature;
+      }
+      
+      // Wait before next attempt
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    } catch (e) {
+      console.error("Error polling for transaction");
+    }
+  }
+  
+  return null;
+}
+
 export interface PaymentRequirements {
   scheme: string;
   network: string;
@@ -47,7 +95,6 @@ async function createPaymentTransaction(
   const requiredMint = new PublicKey(requirements.asset);
   const amount = BigInt(requirements.maxAmountRequired);
 
-  console.log(`Payment requires mint: ${requiredMint.toString()}, amount: ${amount}`);
 
   // Get the user's token account for the required mint
   const senderTokenAddress = await getAssociatedTokenAddress(
@@ -60,7 +107,6 @@ async function createPaymentTransaction(
   try {
     const senderAccount = await getAccount(connection, senderTokenAddress);
     senderBalance = senderAccount.amount;
-    console.log(`Found token account. Mint: ${requiredMint.toString()}, Balance: ${senderBalance}, Required: ${amount}`);
   } catch (error) {
     throw new Error(
       `Token account not found for required mint: ${requiredMint.toString()}. ` +
@@ -90,10 +136,8 @@ async function createPaymentTransaction(
   try {
     await getAccount(connection, recipientTokenAddress);
     recipientTokenAccountExists = true;
-    console.log("Recipient token account exists");
   } catch (error) {
     recipientTokenAccountExists = false;
-    console.log("Recipient token account doesn't exist, will create in transaction");
   }
 
   // Create payment transaction according to x402 exact scheme specification
@@ -145,16 +189,10 @@ async function createPaymentTransaction(
 
   // Verify transaction has correct number of instructions (3 or 4)
   const expectedInstructions = recipientTokenAccountExists ? 3 : 4;
-  console.log(`Transaction has ${transaction.instructions.length} instruction(s), expected ${expectedInstructions}`);
   if (transaction.instructions.length !== expectedInstructions) {
     throw new Error(`Transaction must have ${expectedInstructions} instructions for exact scheme, but has ${transaction.instructions.length}`);
   }
 
-  // Get recent blockhash
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-  transaction.recentBlockhash = blockhash;
-  transaction.lastValidBlockHeight = lastValidBlockHeight;
-  
   // CRITICAL: Fee payer MUST be set to facilitator's address from extra.feePayer
   // The facilitator can't "override" - it's baked into the transaction message
   // User will sign the transfer, facilitator will sign as fee payer during /settle
@@ -164,14 +202,9 @@ async function createPaymentTransaction(
   
   const facilitatorFeePayer = new PublicKey(requirements.extra.feePayer);
   transaction.feePayer = facilitatorFeePayer;
-  console.log("Fee payer set to facilitator:", facilitatorFeePayer.toString());
 
-  // Log transaction details before returning
-  console.log("Transaction details:", {
-    instructions: transaction.instructions.length,
-    feePayer: transaction.feePayer?.toString(),
-    recentBlockhash: transaction.recentBlockhash,
-  });
+  // NOTE: Blockhash will be set right before signing to ensure it's fresh
+  // Setting it here would make it stale by the time facilitator simulates it
 
   return transaction;
 }
@@ -191,9 +224,6 @@ function createXPaymentHeader(signedTransaction: Transaction, requirements: Paym
     verifySignatures: false,
   });
   const base64Tx = Buffer.from(serializedTx).toString("base64");
-  
-  console.log("Serialized transaction length:", serializedTx.length);
-  console.log("Base64 transaction (first 200 chars):", base64Tx.substring(0, 200));
 
   // Create payment payload according to x402 spec
   const paymentPayload: X402PaymentPayload = {
@@ -208,7 +238,6 @@ function createXPaymentHeader(signedTransaction: Transaction, requirements: Paym
   // Base64-encode the payment payload for the X-Payment header
   // The middleware will decode this and forward to facilitator for verify/settle
   const xPaymentHeader = Buffer.from(JSON.stringify(paymentPayload)).toString("base64");
-  console.log("Created X-Payment header (first 100 chars):", xPaymentHeader.substring(0, 100));
   
   return xPaymentHeader;
 }
@@ -224,23 +253,27 @@ export async function wrapFetchWithPaymentSolana(
   facilitatorUrl: string,
   apiUrl: string
 ): Promise<Response> {
-  // Make initial request
+  // Make initial request (should get 402 if unpaid)
   let response = await fetch(url, options);
 
   // If 402 Payment Required, handle payment flow
   if (response.status === 402) {
-    console.log("Received 402 Payment Required, starting payment flow...");
-    
     try {
-      const data = await response.json();
+      const responseText = await response.text();
+      
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Failed to parse 402 response as JSON`);
+      }
+      
       const requirements = data.accepts?.[0] || data.paymentRequirements;
 
       if (!requirements) {
+        console.error("Invalid 402 response structure");
         throw new Error("Invalid 402 response: missing payment requirements");
       }
-
-      console.log("Payment requirements:", requirements);
-      console.log("Payment requirements.extra:", requirements.extra);
       
       // Validate that extra.feePayer exists
       if (!requirements.extra?.feePayer) {
@@ -252,7 +285,6 @@ export async function wrapFetchWithPaymentSolana(
         throw new Error("Wallet not connected or does not support signing");
       }
 
-      console.log("Creating payment transaction...");
       // Create payment transaction (partially-signed, facilitator will add fee payer signature)
       const transaction = await createPaymentTransaction(
         requirements,
@@ -260,21 +292,23 @@ export async function wrapFetchWithPaymentSolana(
         connection
       );
 
-      console.log("Signing transaction with wallet (partially-signed)...");
+      // Get fresh blockhash right before signing to ensure it's not stale
+      // This is critical - stale blockhashes cause simulation failures
+      const { blockhash: freshBlockhash, lastValidBlockHeight: freshLastValidBlockHeight } = 
+        await connection.getLatestBlockhash("finalized");
+      transaction.recentBlockhash = freshBlockhash;
+      transaction.lastValidBlockHeight = freshLastValidBlockHeight;
+
       // Sign transaction with wallet - this creates a PARTIALLY-SIGNED transaction
       // The facilitator will add its fee payer signature during /settle
       const signedTransaction = await wallet.signTransaction(transaction);
 
       // DO NOT send transaction to network ourselves!
       // The facilitator will submit it via /settle after verification
-      console.log("Transaction signed (partially). NOT sending to network - facilitator will handle submission.");
 
       // Create X-Payment header from partially-signed transaction
       // The resource server's middleware will handle verification and settlement
       const xPaymentHeader = createXPaymentHeader(signedTransaction, requirements);
-
-      console.log("Created X-Payment header, retrying request...");
-      console.log("X-Payment header (first 100 chars):", xPaymentHeader.substring(0, 100));
       
       // Retry original request with X-Payment header
       // The middleware will decode this, call facilitator /verify and /settle, then return 200
@@ -286,39 +320,105 @@ export async function wrapFetchWithPaymentSolana(
         },
       });
       
-      console.log(`Retry response status: ${response.status}`);
-      
       // If successful, check for X-Payment-Response header with transaction signature
       if (response.status === 200) {
+        let txSig: string | null = null;
+        
+        // First, try to get from X-Payment-Response header (if middleware sets it)
         const xPaymentResponse = response.headers.get("X-Payment-Response");
         if (xPaymentResponse) {
           try {
             const paymentResponse = JSON.parse(
               Buffer.from(xPaymentResponse, "base64").toString("utf-8")
             );
-            console.log("✅ Payment successful! Transaction details:", {
-              signature: paymentResponse.transaction,
-              network: paymentResponse.network,
-              payer: paymentResponse.payer,
-            });
-            console.log(`🔗 View on Solana Explorer: https://explorer.solana.com/tx/${paymentResponse.transaction}?cluster=devnet`);
+            txSig = paymentResponse.transaction;
           } catch (e) {
-            console.log("Payment successful, but couldn't parse X-Payment-Response header");
+            // Payment successful but couldn't parse header
           }
+        }
+        
+        // If no header, try to get signature by polling the network
+        // The facilitator submits the transaction, so we can find it in recent transactions
+        if (!txSig && wallet.publicKey && requirements.payTo) {
+          try {
+            const recipientPubkey = new PublicKey(requirements.payTo);
+            const amount = BigInt(requirements.maxAmountRequired);
+            
+            // Poll for the transaction signature
+            txSig = await findTransactionSignature(
+              connection,
+              wallet.publicKey,
+              recipientPubkey,
+              amount,
+              5 // Try 5 times with 1 second intervals
+            );
+          } catch (e) {
+            console.error("Error polling for transaction signature");
+          }
+        }
+        
+        // Store txSig in a custom header or return it somehow
+        // We'll attach it to the response object for the caller to use
+        // IMPORTANT: Clone the response body before reading it, so the caller can also read it
+        const responseClone = response.clone();
+        const responseBody = await response.text();
+        
+        if (txSig) {
+          // Create a new response with the txSig in a custom header
+          const newHeaders = new Headers(response.headers);
+          newHeaders.set("X-Transaction-Signature", txSig);
+          response = new Response(responseBody, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: newHeaders,
+          });
         } else {
-          console.log("✅ Payment successful! (No X-Payment-Response header found)");
+          // Even without txSig, recreate response so body can be read
+          response = new Response(responseBody, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
         }
       }
       
       // If still 402, log the response to see what's wrong
       if (response.status === 402) {
         const errorData = await response.json().catch(() => ({}));
-        console.error("Still getting 402 after payment. Response:", errorData);
-        throw new Error("Payment verification failed. The X-Payment header was not accepted by the server.");
+        console.error("Payment verification failed");
+        
+        // Provide more detailed error message based on facilitator error
+        const errorMsg = errorData.error || "Unknown error";
+        if (errorMsg.includes("simulation_failed") || errorMsg.includes("transaction_simulation")) {
+          throw new Error(
+            `Transaction simulation failed: ${errorMsg}\n\n` +
+            "Possible causes:\n" +
+            "1. Blockhash is stale (should be fixed with fresh blockhash)\n" +
+            "2. Transaction structure doesn't match facilitator expectations\n" +
+            "3. Required accounts don't exist or are invalid\n" +
+            "4. Network/RPC issues\n\n" +
+            "Try again - the fresh blockhash should help."
+          );
+        }
+        
+        throw new Error(`Payment verification failed: ${errorMsg}`);
       }
     } catch (error) {
-      console.error("Error in payment flow:", error);
+      console.error("Payment flow error");
       throw error;
+    }
+  } else if (response.status !== 200) {
+    // Not a 402 or 200 - handle error response
+    try {
+      const responseText = await response.text();
+      // Recreate response so it can be read again
+      response = new Response(responseText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } catch (e) {
+      console.error("Could not read response body");
     }
   }
 

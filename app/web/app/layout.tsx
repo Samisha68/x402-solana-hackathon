@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Creator Access Pass",
-  description: "Unlock premium content with instant USDC payments",
+  title: "CoinRush",
+  description: "Solana Quiz - Learn and earn XP with x402 micropayments",
 };
 
 export default function RootLayout({
