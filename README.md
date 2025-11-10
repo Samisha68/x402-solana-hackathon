@@ -1,29 +1,29 @@
-# x402 Answers
+# Coin Rush
 
-Solana RAG Knowledge Hub with x402 micropayments. Ask questions, get previews, unlock full answers via HTTP 402 on Solana Devnet.
+A Solana knowledge quiz application powered by RAG (Retrieval-Augmented Generation). Test your understanding of Solana and Anchor development through topic-based quizzes with x402 micropayments.
 
 ## Overview
 
-x402 Answers is a knowledge platform for Solana/Anchor developers featuring:
-- RAG (Retrieval-Augmented Generation) Q&A system with 40+ curated questions
-- Topic-based quiz system (10 questions per topic)
-- x402 micropayment integration for unlocking full answers
-- Gamification with XP, topic mastery, and progress tracking
+Coin Rush is an interactive quiz platform featuring:
+- Topic-based quiz system with 40 curated questions across 4 topics
+- RAG-powered knowledge base for question generation
+- x402 micropayment integration for unlocking explanations
+- Gamification with XP tracking and topic mastery badges
 
 ## Architecture
 
-- **Backend** (`app/server`): Hono server with x402 payment middleware, RAG endpoints, and quiz API
-- **Frontend** (`app/web`): Next.js application with quiz interface, wallet integration, and payment flow
+- **Backend** (`app/server`): Hono server with RAG knowledge base, quiz API, and x402 payment middleware
+- **Frontend** (`app/web`): Next.js quiz application with topic selection, timer-based questions, and scorecard
 
 ## Prerequisites
 
 - Node.js 20+ (LTS recommended)
 - NPM package manager
-- Solana wallet (for payments)
+- Solana wallet (for payments on wrong answers)
 
 ## Environment Variables
 
-Create a `.env` file in the project root with:
+Create a `.env` file in the project root:
 
 ```
 ADDRESS=YourSolanaWalletAddress
@@ -57,21 +57,13 @@ npm run dev:web
 
 ## How to Enjoy
 
-### Quiz Mode
-
 1. Navigate to the quiz page
 2. Select a topic: Solana Basics, Anchor Basics, PDAs & Programs, or Transactions & Troubleshooting
 3. Enter your name and start the quiz
-4. Answer 10 questions from your chosen topic
-5. Earn XP for correct answers (+15 XP) or pay to unlock explanations for wrong answers (-5 XP penalty)
-6. View your scorecard with topic mastery badge
-
-### RAG Q&A Mode
-
-1. Ask a question about Solana/Anchor development
-2. Receive a free preview (first sentence of the answer)
-3. Pay via x402 to unlock the full answer with detailed explanations and code examples
-4. Track your progress and unlock achievements
+4. Answer 10 questions from your chosen topic (10 seconds per question)
+5. Earn +15 XP for correct answers
+6. For wrong answers, pay via x402 to unlock the explanation (-5 XP penalty)
+7. View your scorecard with topic mastery badge (e.g., "Anchor Basics Master")
 
 ## Build & Deploy
 
@@ -84,8 +76,6 @@ Start production server:
 ```bash
 npm start
 ```
-
-For deployment instructions, see the project documentation.
 
 ## License
 
